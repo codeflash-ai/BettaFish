@@ -5,7 +5,7 @@
 # 数据库相关
 # ===============================
 pymysql==1.1.0
-aiomysql==0.2.0
+aiomysql==0.3.0
 aiosqlite==0.21.0
 asyncpg
 sqlalchemy
