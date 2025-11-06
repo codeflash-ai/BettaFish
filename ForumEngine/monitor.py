@@ -13,6 +13,8 @@ from typing import Dict, Optional, List
 from threading import Lock
 from loguru import logger
 
+_TIMESTAMP_CLEAN_RE = re.compile(r'^\[\d{2}:\d{2}:\d{2}\]\s*')
+
 # 导入论坛主持人模块
 try:
     from .llm_host import generate_host_speech
@@ -180,15 +182,16 @@ class LogMonitor:
                 return None
             
             json_part = first_line[json_start_pos + len("清理后的输出: "):]
-            
-            # 如果第一行就包含完整JSON，直接处理
-            if json_part.strip().endswith("}") and json_part.count("{") == json_part.count("}"):
+
+            json_part_stripped = json_part.strip()
+            # Check for one-line JSON after the marker, only counting { and } if both are present to avoid expensive count if possible
+            if json_part_stripped.endswith("}") and json_part_stripped.count("{") == json_part_stripped.count("}"):
                 try:
-                    json_obj = json.loads(json_part.strip())
+                    # Avoid repeated strip by using stripped already
+                    json_obj = json.loads(json_part_stripped)
                     return self.format_json_content(json_obj)
                 except json.JSONDecodeError:
-                    # 单行JSON解析失败，尝试修复
-                    fixed_json = self.fix_json_string(json_part.strip())
+                    fixed_json = self.fix_json_string(json_part_stripped)
                     if fixed_json:
                         try:
                             json_obj = json.loads(fixed_json)
@@ -196,21 +199,24 @@ class LogMonitor:
                         except json.JSONDecodeError:
                             pass
                     return None
-            
-            # 处理多行JSON
-            json_text = json_part
+
+            # Multi-line JSON handling - build a list and concatenate once for efficiency
+            json_text_list = [json_part]
+            append = json_text_list.append
             for line in json_lines[json_start_idx + 1:]:
-                # 移除时间戳
-                clean_line = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s*', '', line)
-                json_text += clean_line
+                # Remove timestamp with precompiled regex (avoiding per-line pattern compilation)
+                clean_line = _TIMESTAMP_CLEAN_RE.sub('', line)
+                append(clean_line)
+            json_text = ''.join(json_text_list)
+            json_text_stripped = json_text.strip()
+
             
             # 尝试解析JSON
             try:
-                json_obj = json.loads(json_text.strip())
+                json_obj = json.loads(json_text_stripped)
                 return self.format_json_content(json_obj)
             except json.JSONDecodeError:
-                # 多行JSON解析失败，尝试修复
-                fixed_json = self.fix_json_string(json_text.strip())
+                fixed_json = self.fix_json_string(json_text_stripped)
                 if fixed_json:
                     try:
                         json_obj = json.loads(fixed_json)
@@ -218,8 +224,9 @@ class LogMonitor:
                     except json.JSONDecodeError:
                         pass
                 return None
-            
-        except Exception as e:
+
+        except Exception:
+            # 其他异常也不打印错误信息，直接返回None
             # 其他异常也不打印错误信息，直接返回None
             return None
     
@@ -635,26 +642,24 @@ class LogMonitor:
         
         try:
             # 使用状态机方法修复JSON
-            # 遍历字符，跟踪是否在字符串值内部
-            
-            fixed_text = ""
+            result = []
             i = 0
             in_string = False
             escape_next = False
-            
-            while i < len(json_text):
+            length = len(json_text)
+            append = result.append
+
+            while i < length:
                 char = json_text[i]
                 
                 if escape_next:
-                    # 处理转义字符
-                    fixed_text += char
+                    append(char)
                     escape_next = False
                     i += 1
                     continue
                 
                 if char == '\\':
-                    # 转义字符
-                    fixed_text += char
+                    append(char)
                     escape_next = True
                     i += 1
                     continue
@@ -665,33 +670,33 @@ class LogMonitor:
                         # 在字符串内部，检查下一个字符
                         # 如果下一个字符是冒号或者逗号或者大括号，说明这是字符串结束
                         next_char_pos = i + 1
-                        while next_char_pos < len(json_text) and json_text[next_char_pos].isspace():
+                        while next_char_pos < length and json_text[next_char_pos].isspace():
                             next_char_pos += 1
-                        
-                        if next_char_pos < len(json_text):
+
+                        if next_char_pos < length:
                             next_char = json_text[next_char_pos]
                             if next_char in [':', ',', '}']:
                                 # 这是字符串结束，退出字符串状态
                                 in_string = False
-                                fixed_text += char
+                                append(char)
                             else:
-                                # 这是字符串内部的引号，需要转义
-                                fixed_text += '\\"'
+                                append('\\"')
                         else:
                             # 文件结束，退出字符串状态
                             in_string = False
-                            fixed_text += char
+                            append(char)
                     else:
                         # 字符串开始
                         in_string = True
-                        fixed_text += char
+                        append(char)
                 else:
-                    # 其他字符
-                    fixed_text += char
+                    append(char)
                 
                 i += 1
             
             # 尝试解析修复后的JSON
+
+            fixed_text = ''.join(result)
             try:
                 json.loads(fixed_text)
                 return fixed_text
